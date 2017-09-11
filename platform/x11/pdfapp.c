@@ -104,6 +104,7 @@ char *pdfapp_usage(pdfapp_t *app)
 		"N\t\t-- find previous search result\n"
 		"c\t\t-- toggle between color and grayscale\n"
 		"i\t\t-- toggle inverted color mode\n"
+		"C\t\t-- toggle between continuous mode\n"
 		"q\t\t-- quit\n"
 	;
 }
@@ -115,6 +116,8 @@ void pdfapp_init(fz_context *ctx, pdfapp_t *app)
 	app->scrh = 480;
 	app->resolution = 72;
 	app->ctx = ctx;
+	/* We start off in continuous scrolling mode. */
+	app->continuous = 1;
 
 	app->layout_w = 450;
 	app->layout_h = 600;
@@ -611,12 +614,32 @@ static void pdfapp_panview(pdfapp_t *app, int newx, int newy)
 	if (newx > 0)
 		newx = 0;
 	if (newy > 0)
-		newy = 0;
+	{
+		if (app->pageno > 1 && app->continuous)
+		{
+			--app->pageno;
+			pdfapp_showpage(app, 1, 1, 0, 0, 0 /*searching*/);
 
+			app->pany = newy = (app->winh - image_h > -app->pagedivh ?
+													app->winh - image_h : -app->pagedivh) + newy;
+		}
+		else
+			newy = 0;
+	}
 	if (newx + image_w < app->winw)
 		newx = app->winw - image_w;
 	if (newy + image_h < app->winh)
-		newy = app->winh - image_h;
+	{
+		if (app->pageno < app->pagecount && app->continuous)
+		{
+			++app->pageno;
+			pdfapp_showpage(app, 1, 1, 0, 0, 0 /*searching*/);
+			app->pany = newy = (app->winh - app->pagedivh < 0 ? app->winh - app->pagedivh : 0) +
+												 (newy + image_h - app->winh);
+		}
+		else
+			newy = app->winh - image_h;
+	}
 
 	if (app->winw >= image_w)
 		newx = (app->winw - image_w) / 2;
@@ -656,6 +679,21 @@ static void pdfapp_loadpage(pdfapp_t *app, int no_cache)
 	app->page_bbox.x1 = 100;
 	app->page_bbox.y1 = 100;
 
+	if (app->continuous)
+	{
+		if (app->page1_list != NULL)
+			fz_drop_display_list(app->ctx, app->page1_list);
+		if (app->page1 != NULL)
+			fz_drop_page(app->ctx, app->page1);
+
+		app->page1_list = NULL;
+		app->page1 = NULL;
+		app->page1_bbox.x0 = 0;
+		app->page1_bbox.y0 = 0;
+		app->page1_bbox.x1 = 100;
+		app->page1_bbox.y1 = 100;
+	}
+
 	app->incomplete = 0;
 
 	fz_try(app->ctx)
@@ -663,6 +701,15 @@ static void pdfapp_loadpage(pdfapp_t *app, int no_cache)
 		app->page = fz_load_page(app->ctx, app->doc, app->pageno - 1);
 
 		fz_bound_page(app->ctx, app->page, &app->page_bbox);
+		if (app->continuous)
+		{
+			if (app->pageno < app->pagecount)
+				app->page1 = fz_load_page(app->ctx, app->doc, app->pageno);
+			else
+				app->page1 = NULL;
+
+			fz_bound_page(app->ctx, app->page1, &app->page1_bbox);
+		}
 	}
 	fz_catch(app->ctx)
 	{
@@ -686,6 +733,16 @@ static void pdfapp_loadpage(pdfapp_t *app, int no_cache)
 		fz_close_device(app->ctx, mdev);
 		fz_drop_device(app->ctx, mdev);
 		mdev = NULL;
+
+		if (app->page1 != NULL && app->continuous)
+		{
+			app->page1_list = fz_new_display_list(app->ctx, NULL);
+			mdev = fz_new_list_device(app->ctx, app->page1_list);
+			fz_run_page_contents(app->ctx, app->page1, mdev, &fz_identity, &cookie);
+			fz_close_device(app->ctx, mdev);
+			mdev = NULL;
+		}
+
 		app->annotations_list = fz_new_display_list(app->ctx, NULL);
 		mdev = fz_new_list_device(app->ctx, app->annotations_list);
 		for (annot = fz_first_annot(app->ctx, app->page); annot; annot = fz_next_annot(app->ctx, annot))
@@ -776,10 +833,17 @@ static void pdfapp_recreate_annotationslist(pdfapp_t *app)
 	app->errored = errored;
 }
 
-static void pdfapp_runpage(pdfapp_t *app, fz_device *dev, const fz_matrix *ctm, const fz_rect *rect, fz_cookie *cookie)
+static void pdfapp_runpage(pdfapp_t *app, fz_device *dev, const fz_matrix *ctm, const fz_rect *rect, fz_cookie *cookie, int next)
 {
 	if (app->page_list)
-		fz_run_display_list(app->ctx, app->page_list, dev, ctm, rect, cookie);
+	{
+		fz_display_list *page_list = app->page_list;
+
+		if (app->page1_list != NULL && next)
+		   page_list = app->page1_list;
+
+		fz_run_display_list(app->ctx, page_list, dev, ctm, rect, cookie);
+	}
 	if (app->annotations_list)
 		fz_run_display_list(app->ctx, app->annotations_list, dev, ctm, rect, cookie);
 }
@@ -807,7 +871,7 @@ static void pdfapp_updatepage(pdfapp_t *app)
 			fz_rect_from_irect(&bounds, fz_round_rect(&ibounds, &bounds));
 			fz_clear_pixmap_rect_with_value(app->ctx, app->image, 255, &ibounds);
 			idev = fz_new_draw_device_with_bbox(app->ctx, NULL, app->image, &ibounds);
-			pdfapp_runpage(app, idev, &ctm, &bounds, NULL);
+			pdfapp_runpage(app, idev, &ctm, &bounds, NULL, 0);
 			fz_close_device(app->ctx, idev);
 			fz_drop_device(app->ctx, idev);
 		}
@@ -837,7 +901,9 @@ static void pdfapp_showpage(pdfapp_t *app, int loadpage, int drawpage, int repai
 	fz_colorspace *colorspace;
 	fz_matrix ctm;
 	fz_rect bounds;
+	fz_rect bounds1;
 	fz_irect ibounds;
+	fz_irect ibounds1;
 	fz_cookie cookie = { 0 };
 
 	if (!app->nowaitcursor)
@@ -867,7 +933,7 @@ static void pdfapp_showpage(pdfapp_t *app, int loadpage, int drawpage, int repai
 		if (app->page_list || app->annotations_list)
 		{
 			tdev = fz_new_stext_device(app->ctx, app->page_sheet, app->page_text, NULL);
-			pdfapp_runpage(app, tdev, &fz_identity, &fz_infinite_rect, &cookie);
+			pdfapp_runpage(app, tdev, &fz_identity, &fz_infinite_rect, &cookie, 0);
 			fz_close_device(app->ctx, tdev);
 			fz_drop_device(app->ctx, tdev);
 		}
@@ -895,6 +961,12 @@ static void pdfapp_showpage(pdfapp_t *app, int loadpage, int drawpage, int repai
 		bounds = app->page_bbox;
 		fz_round_rect(&ibounds, fz_transform_rect(&bounds, &ctm));
 		fz_rect_from_irect(&bounds, &ibounds);
+		if (app->continuous)
+		{
+			bounds1 = app->page1_bbox;
+			fz_round_rect(&ibounds1, fz_transform_rect(&bounds1, &ctm));
+			fz_rect_from_irect(&bounds1, &ibounds1);
+		}
 
 		/* Draw */
 		fz_drop_pixmap(app->ctx, app->image);
@@ -904,6 +976,19 @@ static void pdfapp_showpage(pdfapp_t *app, int loadpage, int drawpage, int repai
 			colorspace = app->colorspace;
 
 		app->image = NULL;
+
+		if (app->page1 != NULL && app->continuous)
+		{
+			app->pagedivh = ibounds.y1;
+			ibounds.y1 += ibounds1.y1;
+
+			if (ibounds1.x0 < ibounds.x0)
+				ibounds.x0 = ibounds1.x0;
+
+			if (ibounds1.x1 > ibounds.x1)
+				ibounds.x1 = ibounds1.x1;
+		}
+
 		fz_var(app->image);
 
 		fz_try(app->ctx)
@@ -913,7 +998,22 @@ static void pdfapp_showpage(pdfapp_t *app, int loadpage, int drawpage, int repai
 			if (app->page_list || app->annotations_list)
 			{
 				idev = fz_new_draw_device(app->ctx, NULL, app->image);
-				pdfapp_runpage(app, idev, &ctm, &bounds, &cookie);
+				pdfapp_runpage(app, idev, &ctm, &bounds, &cookie, 0);
+
+				if (app->page1 != NULL && app->continuous && app->page1_list != NULL)
+				{
+					fz_matrix ctm1;
+					fz_matrix ctm2;
+
+					fz_translate(&ctm1, 0, bounds.y1);
+					fz_concat(&ctm2, &ctm, &ctm1);
+
+					bounds1.y0 += bounds.y1;
+					bounds1.y1 += bounds.y1;
+
+					pdfapp_runpage(app, idev, &ctm2, &bounds1, &cookie, app->continuous);
+				}
+
 				fz_close_device(app->ctx, idev);
 				fz_drop_device(app->ctx, idev);
 			}
@@ -1132,6 +1232,7 @@ void pdfapp_onkey(pdfapp_t *app, int c, int modifiers)
 	int oldpage = app->pageno;
 	enum panning panto = PAN_TO_TOP;
 	int loadpage = 1;
+	int image_h = fz_pixmap_height(app->ctx, app->image);
 
 	if (app->issearching)
 	{
@@ -1256,6 +1357,7 @@ void pdfapp_onkey(pdfapp_t *app, int c, int modifiers)
 
 	case 'C':
 		app->tint ^= 1;
+		app->continuous ^= 1;
 		pdfapp_showpage(app, 0, 1, 1, 0, 0);
 		break;
 
@@ -1523,7 +1625,15 @@ void pdfapp_onkey(pdfapp_t *app, int c, int modifiers)
 			app->pany = 0;
 			break;
 		case PAN_TO_BOTTOM:
-			app->pany = -2000;
+			if (app->continuous)
+			{
+				if (app->winh - image_h / 2 < 0)
+					app->pany = app->winh - image_h / 2;
+				else
+					app->pany = 0;
+			}
+			else
+				app->pany = -2000;
 			break;
 		case DONT_PAN:
 			break;

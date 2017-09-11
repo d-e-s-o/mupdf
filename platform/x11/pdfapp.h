@@ -70,6 +70,7 @@ struct pdfapp_s
 	fz_colorspace *colorspace;
 	int invert;
 	int tint, tint_r, tint_g, tint_b;
+	int continuous;
 
 	/* presentation mode */
 	int presentation_mode;
@@ -84,8 +85,12 @@ struct pdfapp_s
 	/* current page params */
 	int pageno;
 	fz_page *page;
+	int pagedivh;
+	fz_page *page1;
 	fz_rect page_bbox;
+	fz_rect page1_bbox;
 	fz_display_list *page_list;
+	fz_display_list *page1_list;
 	fz_display_list *annotations_list;
 	fz_stext_page *page_text;
 	fz_stext_sheet *page_sheet;
