@@ -1316,7 +1316,7 @@ void pdfapp_onkey(pdfapp_t *app, int c, int modifiers)
 			}
 			else
 			{
-				app->pany -= h / 10;
+				app->pany -= h / 50;
 				pdfapp_showpage(app, 0, 0, 1, 0, 0);
 			}
 			break;
@@ -1332,7 +1332,7 @@ void pdfapp_onkey(pdfapp_t *app, int c, int modifiers)
 			}
 			else
 			{
-				app->pany += h / 10;
+				app->pany += h / 50;
 				pdfapp_showpage(app, 0, 0, 1, 0, 0);
 			}
 			break;
